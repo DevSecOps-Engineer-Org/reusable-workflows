@@ -1,1 +1,131 @@
+name: SonarQube Scan
+description: Scan source code with SonarQube
 
+inputs:
+
+  app-name:
+    description: The app name
+    required: true
+
+  organization:
+    description: the organization
+    required: true
+    
+  build-timestamp:
+    description: The build timestamp
+    required: true
+
+  tek:
+    description: The technology
+    required: false
+    default: ''
+
+  sonar-url:
+    description: SonarQube URL
+    required: false
+    default: 'https://sonarcloud.io'
+
+  sonar-token:
+    description: SonarQube token
+    required: false
+    default: ''
+
+  coverage-path:
+    description: Coverage report path
+    required: false
+    default: ''
+
+  coverage-exclusions:
+    description: Coverage exclusions
+    required: false
+    default: ''
+
+  java-binaries:
+    description: Java binaries path
+    required: false
+    default: '.'
+
+  sources:
+    description: Source roots to scan (used when tek=mainframe)
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Create file sonar-project.properties
+      shell: bash
+      run: |
+        echo "## Sonar Parameters" >> "$GITHUB_STEP_SUMMARY"
+
+        cat > sonar-project.properties <<EOF
+        sonar.host.url=${{ inputs.sonar-url }}
+        sonar.projectKey=${{ inputs.organization }}:${{ inputs.app-name }}
+        sonar.projectName=${{ inputs.app-name }}
+        sonar.sourceEncoding=UTF-8
+        sonar.sources=src
+        sonar.links.ci=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        sonar.links.scm=https://github.com/${{ github.repository }}.git
+        sonar.analysis.version=${{ inputs.app-version }}
+        sonar.analysis.userId=${{ github.actor }}
+        sonar.analysis.commitId=${{ github.sha }}
+        sonar.analysis.tek=${{ inputs.tek }}
+        sonar.analysis.projectName=${{ inputs.app-code }}
+        sonar.analysis.branch=${{ github.ref }}
+        sonar.analysis.jobname=${{ github.job }}
+        EOF
+
+        if [[ "${{ inputs.tek }}" == "mainframe" ]]; then
+          echo "sonar.sources=${{ inputs.sources }}" >> sonar-project.properties
+          echo "sonar.inclusions=**/*.cbl,**/*.cob,**/*.cpy" >> sonar-project.properties
+          # echo "sonar.cobol.copy.directories=copybooks" >> sonar-project.properties
+          echo "sonar.cobol.file.suffixes=.cbl,.cpy,.cob" >> sonar-project.properties
+          echo "sonar.cobol.copy.suffixes=cpy" >> sonar-project.properties
+          echo "sonar.cobol.sourceFormat=fixed" >> sonar-project.properties
+          echo "sonar.cobol.dialect=ibm-enterprise-cobol" >> sonar-project.properties
+        fi
+
+        if [[ "${{ inputs.tek }}" == "net-core" ]]; then
+          echo "sonar.cs.opencover.reportsPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
+          echo "sonar.cs.opencover.reportPaths.relative=true" >> sonar-project.properties
+        fi
+
+        # if [[ "${{ inputs.tek }}" == "maven" ]]; then
+        #   echo "sonar.coverage.exclusions=${{ inputs.coverage-exclusions }}" >> sonar-project.properties
+        #   echo "sonar.java.binaries=${{ inputs.java-binaries }}" >> sonar-project.properties
+        #   echo "sonar.junit.reportsPath=target/surefire-reports" >> sonar-project.properties
+        #   echo "sonar.coverage.jacoco.xmlReportPaths=target/site/jacoco-ut/jacoco.xml" >> sonar-project.properties
+        #   echo "sonar.java.coveragePlugin=jacoco" >> sonar-project.properties
+        #   echo "sonar.jacoco.reportPaths=target/coverage/jacoco/jacoco-ut.exec" >> sonar-project.properties
+        #   echo "sonar.jacoco.reportPaths.relative=true" >> sonar-project.properties
+        # fi
+
+        cat sonar-project.properties
+        cat sonar-project.properties >> "$GITHUB_STEP_SUMMARY"
+
+    - name: SonarQube Scan
+      uses: SonarSource/sonarqube-scan-action@13990a695682794b53148ff9f6a8b6e22e43955e
+      env:
+        SONAR_HOST_URL: ${{ inputs.sonar-url }}
+        SONAR_TOKEN: ${{ inputs.sonar-token }}
+
+    - name: Print report
+      shell: bash
+      run: |
+        echo "## SonarQube Scan Results" >> "$GITHUB_STEP_SUMMARY"
+        cat .scannerwork/report-task.txt
+        cat .scannerwork/report-task.txt >> "$GITHUB_STEP_SUMMARY"
+
+    - name: SonarQube Quality Gate check
+      id: sonarqube-quality-gate-check
+      uses: SonarSource/sonarqube-quality-gate-action@7a5fffe8e523c40e0c740b6bc2712ab503e52efa
+      env:
+        SONAR_HOST_URL: ${{ inputs.sonar-url }}
+        SONAR_TOKEN: ${{ inputs.sonar-token }}
+
+    - name: Show SonarQube Quality Gate Status value
+      shell: bash
+      run: |
+        echo "## SonarQube Quality Gate Status" >> "$GITHUB_STEP_SUMMARY"
+        echo "The Quality Gate status is ${{ steps.sonarqube-quality-gate-check.outputs.quality-gate-status }}" >> "$GITHUB_STEP_SUMMARY"
+        echo "The Quality Gate status is ${{ steps.sonarqube-quality-gate-check.outputs.quality-gate-status }}"
