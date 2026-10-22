@@ -71,7 +71,7 @@ runs:
         sonar.sources=${{ inputs.sources }}
         sonar.links.ci=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         sonar.links.scm=https://github.com/${{ github.repository }}.git
-        sonar.analysis.version=${VERSION}
+        sonar.projectVersion=${VERSION}
         sonar.analysis.userId=${{ github.actor }}
         sonar.analysis.commitId=${{ github.sha }}
         sonar.analysis.tek=${{ inputs.tek }}
