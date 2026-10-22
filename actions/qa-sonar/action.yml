@@ -67,10 +67,14 @@ runs:
         APP_CODE="${{ inputs.app-code }}"
         [ -z "$APP_CODE" ] && APP_CODE="${{ inputs.app-name }}"
         
+        # Lógica para definir el Project Key de forma inteligente
+        PROJ_KEY="${{ inputs.project-key }}"
+        [ -z "$PROJ_KEY" ] && PROJ_KEY="${{ inputs.organization }}:${{ inputs.app-name }}"
+
         cat > sonar-project.properties <<EOF
         sonar.host.url=${{ inputs.sonar-url }}
         sonar.organization=${{ inputs.organization }}
-        sonar.projectKey=${{ inputs.organization }}:${{ inputs.app-name }}
+        sonar.projectKey=${PROJ_KEY}
         sonar.projectName=${{ inputs.app-name }}
         sonar.sourceEncoding=UTF-8
         sonar.sources=${{ inputs.sources }}
