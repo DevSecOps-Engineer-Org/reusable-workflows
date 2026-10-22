@@ -50,7 +50,7 @@ inputs:
   sources:
     description: Source roots to scan
     required: false
-    default: 'src'
+    default: '.'
 
 runs:
   using: composite
