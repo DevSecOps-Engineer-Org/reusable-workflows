@@ -1,54 +1,56 @@
 name: SonarQube Scan
-description: Scan source code with SonarQube
+description: Scan source code with SonarQube (Polyglot)
 
 inputs:
-
   app-name:
     description: The app name
     required: true
-
   organization:
     description: the organization
     required: true
-    
+  app-version:
+    description: Application version (defaults to build-timestamp)
+    required: false
+    default: ''
+  app-code:
+    description: Application code (optional)
+    required: false
+    default: ''
   build-timestamp:
     description: The build timestamp
     required: true
-
   tek:
-    description: The technology
+    description: Technology (java|maven|gradle|kmp|nextjs|nodejs|net-core|mainframe|...)
     required: false
     default: ''
-
   sonar-url:
     description: SonarQube URL
     required: false
     default: 'https://sonarcloud.io'
-
   sonar-token:
     description: SonarQube token
     required: false
     default: ''
-
   coverage-path:
-    description: Coverage report path
+    description: Coverage report path (lcov.info, jacoco.xml, opencover.xml, kover xml)
     required: false
     default: ''
-
+  coverage-tool:
+    description: Coverage tool (jacoco|kover|opencover|lcov|auto)
+    required: false
+    default: 'auto'
   coverage-exclusions:
     description: Coverage exclusions
     required: false
     default: ''
-
   java-binaries:
     description: Java binaries path
     required: false
-    default: '.'
-
+    default: 'target/classes,build/classes'
   sources:
-    description: Source roots to scan (used when tek=mainframe)
+    description: Source roots to scan
     required: false
-    default: '.'
+    default: 'src'
 
 runs:
   using: composite
@@ -56,49 +58,96 @@ runs:
     - name: Create file sonar-project.properties
       shell: bash
       run: |
-        echo "## Sonar Parameters" >> "$GITHUB_STEP_SUMMARY"
-
+        VERSION="${{ inputs.app-version }}"
+        [ -z "$VERSION" ] && VERSION="${{ inputs.build-timestamp }}"
+        APP_CODE="${{ inputs.app-code }}"
+        [ -z "$APP_CODE" ] && APP_CODE="${{ inputs.app-name }}"
+        
         cat > sonar-project.properties <<EOF
         sonar.host.url=${{ inputs.sonar-url }}
         sonar.projectKey=${{ inputs.organization }}:${{ inputs.app-name }}
         sonar.projectName=${{ inputs.app-name }}
         sonar.sourceEncoding=UTF-8
-        sonar.sources=src
+        sonar.sources=${{ inputs.sources }}
         sonar.links.ci=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         sonar.links.scm=https://github.com/${{ github.repository }}.git
-        sonar.analysis.version=${{ inputs.app-version }}
+        sonar.analysis.version=${VERSION}
         sonar.analysis.userId=${{ github.actor }}
         sonar.analysis.commitId=${{ github.sha }}
         sonar.analysis.tek=${{ inputs.tek }}
-        sonar.analysis.projectName=${{ inputs.app-code }}
+        sonar.analysis.projectName=${APP_CODE}
         sonar.analysis.branch=${{ github.ref }}
         sonar.analysis.jobname=${{ github.job }}
         EOF
 
-        if [[ "${{ inputs.tek }}" == "mainframe" ]]; then
+        TEK="${{ inputs.tek }}"
+        # Java/Maven
+        if [[ "$TEK" == "java" || "$TEK" == "maven" ]]; then
+          echo "sonar.java.binaries=${{ inputs.java-binaries }}" >> sonar-project.properties
+          echo "sonar.junit.reportPaths=target/surefire-reports" >> sonar-project.properties
+          if [ -n "${{ inputs.coverage-path }}" ]; then
+            echo "sonar.coverage.jacoco.xmlReportPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
+          else
+            echo "sonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml,target/site/jacoco-ut/jacoco.xml" >> sonar-project.properties
+          fi
+          echo "sonar.java.coveragePlugin=jacoco" >> sonar-project.properties
+          [ -n "${{ inputs.coverage-exclusions }}" ] && echo "sonar.coverage.exclusions=${{ inputs.coverage-exclusions }}" >> sonar-project.properties
+        fi
+
+        # Gradle/Java
+        if [[ "$TEK" == "gradle" ]]; then
+          echo "sonar.java.binaries=${{ inputs.java-binaries }}" >> sonar-project.properties
+          echo "sonar.junit.reportPaths=build/test-results/test" >> sonar-project.properties
+          if [ -n "${{ inputs.coverage-path }}" ]; then
+            echo "sonar.coverage.jacoco.xmlReportPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
+          else
+            echo "sonar.coverage.jacoco.xmlReportPaths=build/reports/jacoco/test/jacocoTestReport.xml" >> sonar-project.properties
+          fi
+          echo "sonar.java.coveragePlugin=jacoco" >> sonar-project.properties
+          [ -n "${{ inputs.coverage-exclusions }}" ] && echo "sonar.coverage.exclusions=${{ inputs.coverage-exclusions }}" >> sonar-project.properties
+        fi
+
+        # KMP/Kover
+        if [[ "$TEK" == "kmp" || "$TEK" == "kotlin-multiplatform" ]]; then
+          echo "sonar.java.binaries=${{ inputs.java-binaries }}" >> sonar-project.properties
+          if [ -n "${{ inputs.coverage-path }}" ]; then
+            echo "sonar.kotlin.coverage.reportPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
+          else
+            echo "sonar.kotlin.coverage.reportPaths=build/reports/kover/report.xml" >> sonar-project.properties
+          fi
+          [ -n "${{ inputs.coverage-exclusions }}" ] && echo "sonar.coverage.exclusions=${{ inputs.coverage-exclusions }}" >> sonar-project.properties
+        fi
+
+        # JS/TS/Next.js/Node
+        if [[ "$TEK" == "nextjs" || "$TEK" == "nodejs" || "$TEK" == "javascript" || "$TEK" == "typescript" || "$TEK" == "node" ]]; then
+          echo "sonar.sources=${{ inputs.sources }}" >> sonar-project.properties
+          echo "sonar.exclusions=**/node_modules/**,**/.next/**,**/dist/**,**/build/**,**/coverage/**,**/*.test.ts,**/*.spec.ts,**/*.test.tsx,**/*.spec.tsx" >> sonar-project.properties
+          echo "sonar.test.inclusions=**/*.test.ts,**/*.spec.ts,**/*.test.tsx,**/*.spec.tsx,**/*.test.js,**/*.spec.js" >> sonar-project.properties
+          if [ -n "${{ inputs.coverage-path }}" ]; then
+            echo "sonar.javascript.lcov.reportPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
+            echo "sonar.typescript.lcov.reportPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
+          fi
+          [ -n "${{ inputs.coverage-exclusions }}" ] && echo "sonar.coverage.exclusions=${{ inputs.coverage-exclusions }}" >> sonar-project.properties
+        fi
+
+        # .NET Core
+        if [[ "$TEK" == "net-core" || "$TEK" == "dotnet" || "$TEK" == "csharp" ]]; then
+          if [ -n "${{ inputs.coverage-path }}" ]; then
+            echo "sonar.cs.opencover.reportsPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
+            echo "sonar.cs.opencover.reportPaths.relative=true" >> sonar-project.properties
+          fi
+          [ -n "${{ inputs.coverage-exclusions }}" ] && echo "sonar.coverage.exclusions=${{ inputs.coverage-exclusions }}" >> sonar-project.properties
+        fi
+
+        # Mainframe
+        if [[ "$TEK" == "mainframe" ]]; then
           echo "sonar.sources=${{ inputs.sources }}" >> sonar-project.properties
           echo "sonar.inclusions=**/*.cbl,**/*.cob,**/*.cpy" >> sonar-project.properties
-          # echo "sonar.cobol.copy.directories=copybooks" >> sonar-project.properties
           echo "sonar.cobol.file.suffixes=.cbl,.cpy,.cob" >> sonar-project.properties
           echo "sonar.cobol.copy.suffixes=cpy" >> sonar-project.properties
           echo "sonar.cobol.sourceFormat=fixed" >> sonar-project.properties
           echo "sonar.cobol.dialect=ibm-enterprise-cobol" >> sonar-project.properties
         fi
-
-        if [[ "${{ inputs.tek }}" == "net-core" ]]; then
-          echo "sonar.cs.opencover.reportsPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
-          echo "sonar.cs.opencover.reportPaths.relative=true" >> sonar-project.properties
-        fi
-
-        # if [[ "${{ inputs.tek }}" == "maven" ]]; then
-        #   echo "sonar.coverage.exclusions=${{ inputs.coverage-exclusions }}" >> sonar-project.properties
-        #   echo "sonar.java.binaries=${{ inputs.java-binaries }}" >> sonar-project.properties
-        #   echo "sonar.junit.reportsPath=target/surefire-reports" >> sonar-project.properties
-        #   echo "sonar.coverage.jacoco.xmlReportPaths=target/site/jacoco-ut/jacoco.xml" >> sonar-project.properties
-        #   echo "sonar.java.coveragePlugin=jacoco" >> sonar-project.properties
-        #   echo "sonar.jacoco.reportPaths=target/coverage/jacoco/jacoco-ut.exec" >> sonar-project.properties
-        #   echo "sonar.jacoco.reportPaths.relative=true" >> sonar-project.properties
-        # fi
 
         cat sonar-project.properties
         cat sonar-project.properties >> "$GITHUB_STEP_SUMMARY"
