@@ -65,6 +65,7 @@ runs:
         
         cat > sonar-project.properties <<EOF
         sonar.host.url=${{ inputs.sonar-url }}
+        sonar.organization=${{ inputs.organization }}
         sonar.projectKey=${{ inputs.organization }}:${{ inputs.app-name }}
         sonar.projectName=${{ inputs.app-name }}
         sonar.sourceEncoding=UTF-8
