@@ -5,6 +5,10 @@ inputs:
   app-name:
     description: The app name
     required: true
+  project-key:
+    description: Custom Sonar Project Key (optional)
+    required: false
+    default: ''
   organization:
     description: the organization
     required: true
