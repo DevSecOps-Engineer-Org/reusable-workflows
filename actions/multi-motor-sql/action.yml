@@ -1,0 +1,151 @@
+name: SQL Database for CI
+description: Levanta una base de datos SQL (postgres|mysql|mariadb) en Docker y espera a que acepte conexiones
+
+inputs:
+  engine:
+    description: Motor SQL (postgres|mysql|mariadb)
+    required: false
+    default: postgres
+  db-name:
+    description: Nombre de la base de datos
+    required: false
+    default: app_db
+  db-user:
+    description: Usuario de la base de datos
+    required: false
+    default: app_user
+  db-password:
+    description: Contrasena de la base de datos
+    required: false
+    default: ci_db_password
+  db-version:
+    description: Tag de la imagen del motor (vacio = default por motor)
+    required: false
+    default: ""
+  image:
+    description: Imagen Docker completa (opcional, sobreescribe engine:db-version)
+    required: false
+    default: ""
+  port:
+    description: Puerto expuesto en el host (vacio = default del motor)
+    required: false
+    default: ""
+  container-name:
+    description: Nombre del contenedor
+    required: false
+    default: ci-sql-db
+  wait-seconds:
+    description: Tiempo maximo de espera para que la DB acepte conexiones (segundos)
+    required: false
+    default: "60"
+
+outputs:
+  host:
+    description: Host de la base de datos
+    value: "localhost"
+  port:
+    description: Puerto expuesto en el host
+    value: ${{ steps.start.outputs.port }}
+  container:
+    description: Nombre del contenedor levantado
+    value: ${{ steps.start.outputs.container }}
+
+runs:
+  using: composite
+  steps:
+    - name: Start SQL database container
+      id: start
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        ENGINE="${{ inputs.engine }}"
+        DB_NAME="${{ inputs.db-name }}"
+        DB_USER="${{ inputs.db-user }}"
+        DB_PASS="${{ inputs.db-password }}"
+        CONTAINER="${{ inputs.container-name }}"
+        VERSION="${{ inputs.db-version }}"
+        PORT="${{ inputs.port }}"
+
+        # Defaults de imagen y puerto por motor
+        case "$ENGINE" in
+          postgres)
+            [ -z "$VERSION" ] && VERSION="17"
+            [ -z "$PORT" ] && PORT="5432"
+            INTERNAL_PORT="5432"
+            ENV_ARGS=(-e "POSTGRES_USER=$DB_USER" -e "POSTGRES_PASSWORD=$DB_PASS" -e "POSTGRES_DB=$DB_NAME")
+            HEALTH_CMD="psql -U $DB_USER -d $DB_NAME -c 'SELECT 1'"
+            ;;
+          mysql)
+            [ -z "$VERSION" ] && VERSION="8.4"
+            [ -z "$PORT" ] && PORT="3306"
+            INTERNAL_PORT="3306"
+            ENV_ARGS=(-e "MYSQL_USER=$DB_USER" -e "MYSQL_PASSWORD=$DB_PASS" -e "MYSQL_DATABASE=$DB_NAME" -e "MYSQL_ROOT_PASSWORD=$DB_PASS")
+            HEALTH_CMD="mysql -u $DB_USER -p$DB_PASS -e 'SELECT 1' $DB_NAME"
+            ;;
+          mariadb)
+            [ -z "$VERSION" ] && VERSION="11"
+            [ -z "$PORT" ] && PORT="3306"
+            INTERNAL_PORT="3306"
+            ENV_ARGS=(-e "MARIADB_USER=$DB_USER" -e "MARIADB_PASSWORD=$DB_PASS" -e "MARIADB_DATABASE=$DB_NAME" -e "MARIADB_ROOT_PASSWORD=$DB_PASS")
+            HEALTH_CMD="mariadb -u $DB_USER -p$DB_PASS -e 'SELECT 1' $DB_NAME"
+            ;;
+          *)
+            echo "::error::Engine no soportado: '$ENGINE'. Valores validos: postgres|mysql|mariadb"
+            exit 1
+            ;;
+        esac
+
+        IMAGE="${{ inputs.image }}"
+        [ -z "$IMAGE" ] && IMAGE="$ENGINE:$VERSION"
+
+        # Limpia un contenedor previo con el mismo nombre (reintentos en el mismo job)
+        docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+        docker run -d --name "$CONTAINER" \
+          -p "${PORT}:${INTERNAL_PORT}" \
+          "${ENV_ARGS[@]}" \
+          "$IMAGE" >/dev/null
+
+        echo "port=$PORT" >> "$GITHUB_OUTPUT"
+        echo "container=$CONTAINER" >> "$GITHUB_OUTPUT"
+        echo "health=$HEALTH_CMD" >> "$GITHUB_OUTPUT"
+
+    - name: Wait for database ready
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        CONTAINER="${{ steps.start.outputs.container }}"
+        HEALTH_CMD="${{ steps.start.outputs.health }}"
+        WAIT="${{ inputs.wait-seconds }}"
+        DEADLINE=$((SECONDS + WAIT))
+
+        echo "Esperando a que la base de datos acepte conexiones (max ${WAIT}s)..."
+        until docker exec "$CONTAINER" bash -c "$HEALTH_CMD" >/dev/null 2>&1; do
+          if [ "$SECONDS" -ge "$DEADLINE" ]; then
+            echo "::error::La base de datos no respondio en ${WAIT}s. Logs del contenedor:"
+            docker logs "$CONTAINER" 2>&1 | tail -50
+            exit 1
+          fi
+          sleep 2
+        done
+        echo "Base de datos lista."
+
+    - name: Summary
+      shell: bash
+      run: |
+        ENGINE="${{ inputs.engine }}"
+        CONTAINER="${{ steps.start.outputs.container }}"
+        PORT="${{ steps.start.outputs.port }}"
+        DB_NAME="${{ inputs.db-name }}"
+        DB_USER="${{ inputs.db-user }}"
+
+        echo "## SQL Database (CI)" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Parametro | Valor |" >> "$GITHUB_STEP_SUMMARY"
+        echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Engine | $ENGINE |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Host:Port | localhost:$PORT |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Database | $DB_NAME |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| User | $DB_USER |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Container | $CONTAINER |" >> "$GITHUB_STEP_SUMMARY"
