@@ -171,9 +171,15 @@ runs:
 
         # JS/TS/Next.js/Node
         if [[ "$TEK" == "nextjs" || "$TEK" == "nodejs" || "$TEK" == "javascript" || "$TEK" == "typescript" || "$TEK" == "node" ]]; then
-          echo "sonar.sources=${{ inputs.sources }}" >> sonar-project.properties
-          echo "sonar.exclusions=**/node_modules/**,**/.next/**,**/dist/**,**/build/**,**/coverage/**,**/*.test.ts,**/*.spec.ts,**/*.test.tsx,**/*.spec.tsx" >> sonar-project.properties
+          # sonar.sources ya quedó declarado en la plantilla base (defaults a ".")
+          echo "sonar.exclusions=**/node_modules/**,**/.next/**,**/dist/**,**/build/**,**/coverage/**,**/public/**,**/package-lock.json,**/next-env.d.ts,**/*.test.ts,**/*.spec.ts,**/*.test.tsx,**/*.spec.tsx" >> sonar-project.properties
           echo "sonar.test.inclusions=**/*.test.ts,**/*.spec.ts,**/*.test.tsx,**/*.spec.tsx,**/*.test.js,**/*.spec.js" >> sonar-project.properties
+          # Configuración de TypeScript: autodetección de tsconfig(s) en la raíz
+          TSCONFIGS=""
+          for f in tsconfig.json tsconfig.*.json; do
+            [ -f "$f" ] && TSCONFIGS="${TSCONFIGS:+$TSCONFIGS,}$f"
+          done
+          [ -n "$TSCONFIGS" ] && echo "sonar.typescript.tsconfigPaths=$TSCONFIGS" >> sonar-project.properties
           if [ -n "${{ inputs.coverage-path }}" ]; then
             echo "sonar.javascript.lcov.reportPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
             echo "sonar.typescript.lcov.reportPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
