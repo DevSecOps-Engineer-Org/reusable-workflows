@@ -24,7 +24,7 @@ inputs:
     description: The build timestamp
     required: true
   tek:
-    description: Technology (java|maven|gradle|kmp|nextjs|nodejs|net-core|mainframe|...)
+    description: Technology (java|maven|gradle|kmp|android|nextjs|nodejs|net-core|mainframe|...)
     required: false
     default: ""
   sonar-url:
@@ -129,8 +129,18 @@ runs:
 
         # Android (AGP: fuentes, clases compiladas y cobertura JaCoCo de tests unitarios)
         if [[ "$TEK" == "android" ]]; then
-          echo "sonar.sources=app/src/main/java,app/src/main/kotlin" >> sonar-project.properties
-          echo "sonar.tests=app/src/test/java,app/src/test/kotlin" >> sonar-project.properties
+          # Solo directorios existentes: el scanner falla si sonar.sources/sonar.tests apuntan a carpetas inexistentes
+          SOURCES=""
+          for d in app/src/main/java app/src/main/kotlin; do
+            [ -d "$d" ] && SOURCES="${SOURCES:+$SOURCES,}$d"
+          done
+          [ -n "$SOURCES" ] && echo "sonar.sources=$SOURCES" >> sonar-project.properties
+
+          TESTS=""
+          for d in app/src/test/java app/src/test/kotlin app/src/androidTest/java app/src/androidTest/kotlin; do
+            [ -d "$d" ] && TESTS="${TESTS:+$TESTS,}$d"
+          done
+          [ -n "$TESTS" ] && echo "sonar.tests=$TESTS" >> sonar-project.properties
 
           # Clases compiladas: solo se registran los directorios que existen (las rutas de AGP varian segun version)
           BINARIES=""
