@@ -1,0 +1,137 @@
+name: SQL Lint (sqlfluff)
+description: Lintea archivos SQL con sqlfluff, multi-dialecto (postgres|mysql|mariadb|ansi|tsql|...)
+
+inputs:
+  sql-paths:
+    description: Rutas (archivos o directorios) a lintear, separadas por coma o espacio
+    required: false
+    default: "src/main/resources/db/migration"
+  dialect:
+    description: Dialecto sqlfluff (postgres|mysql|mariadb|ansi|tsql|oracle|...)
+    required: false
+    default: postgres
+  sqlfluff-version:
+    description: Version de sqlfluff a instalar (pinneada para consistencia entre repos)
+    required: false
+    default: "4.4.0"
+  config-path:
+    description: Archivo de configuracion del repo (vacio = autodeteccion de .sqlfluff)
+    required: false
+    default: ""
+  fail-on-error:
+    description: "true: falla el paso si hay violaciones | false: solo advierte"
+    required: false
+    default: "true"
+  extra-args:
+    description: Argumentos extra para sqlfluff lint
+    required: false
+    default: ""
+
+outputs:
+  violations:
+    description: Numero de violaciones encontradas
+    value: ${{ steps.lint.outputs.violations }}
+  skipped:
+    description: "true si se omitio el lint (rutas inexistentes)"
+    value: ${{ steps.paths.outputs.skip }}
+
+runs:
+  using: composite
+  steps:
+    - name: Verify SQL paths
+      id: paths
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        INPUT_PATHS="${{ inputs.sql-paths }}"
+        EXISTING=""
+        for p in ${INPUT_PATHS//,/ }; do
+          [ -e "$p" ] && EXISTING="$EXISTING $p"
+        done
+
+        if [ -z "$EXISTING" ]; then
+          echo "::warning::SQL lint omitido: ninguna ruta existe ($INPUT_PATHS)"
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "paths=$EXISTING" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Install sqlfluff
+      if: steps.paths.outputs.skip == 'false'
+      shell: bash
+      run: python3 -m pip install --quiet "sqlfluff==${{ inputs.sqlfluff-version }}"
+
+    - name: Validate dialect
+      if: steps.paths.outputs.skip == 'false'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        DIALECT="${{ inputs.dialect }}"
+        AVAILABLE="$(sqlfluff dialects 2>/dev/null | awk -F: '{print tolower($1)}' | grep -E '^[a-z0-9_]+$')"
+
+        if ! echo "$AVAILABLE" | grep -qx "$DIALECT"; then
+          echo "::error::Dialecto '$DIALECT' no soportado por sqlfluff ${{ inputs.sqlfluff-version }}. Disponibles:"
+          echo "$AVAILABLE" | sed 's/^/  - /'
+          exit 1
+        fi
+        echo "Dialecto '$DIALECT' OK."
+
+    - name: Run sqlfluff lint
+      id: lint
+      shell: bash
+      run: |
+        # sin set -e: el codigo de retorno de sqlfluff se maneja manualmente
+        PATHS="${{ steps.paths.outputs.paths }}"
+        DIALECT="${{ inputs.dialect }}"
+        CONFIG="${{ inputs.config-path }}"
+        CONFIG_ARG=""
+        if [ -n "$CONFIG" ]; then
+          CONFIG_ARG="--config $CONFIG"
+        elif [ ! -f .sqlfluff ]; then
+          # Sin config del repo: desactiva el limite de archivos grandes
+          # (sqlfluff omite archivos > 20KB por defecto; en CI queremos lintearlos todos).
+          # Si el repo define su propio .sqlfluff, ese tiene prioridad y se respeta tal cual.
+          DEFAULT_CFG="$(mktemp)"
+          printf '[sqlfluff]\nlarge_file_skip_byte_limit = 0\nmax_parse_nodes = 0\n' > "$DEFAULT_CFG"
+          CONFIG_ARG="--config $DEFAULT_CFG"
+        fi
+
+        LOG="$(mktemp)"
+        set +e
+        sqlfluff lint $PATHS --dialect "$DIALECT" $CONFIG_ARG ${{ inputs.extra-args }} 2>&1 | tee "$LOG"
+        RC=${PIPESTATUS[0]}
+        set -e
+
+        VIOLATIONS=$(grep -cE '^\s*L:\s*[0-9]+' "$LOG" || true)
+        echo "violations=$VIOLATIONS" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "## SQL Lint (sqlfluff ${{ inputs.sqlfluff-version }})"
+          echo ""
+          echo "| Parametro | Valor |"
+          echo "|---|---|"
+          echo "| Dialecto | $DIALECT |"
+          echo "| Rutas |$PATHS |"
+          echo "| Violaciones | $VIOLATIONS |"
+          echo ""
+          if [ "$VIOLATIONS" -gt 0 ]; then
+            echo "<details><summary>Hallazgos (primeros 100)</summary>"
+            echo ""
+            echo '```'
+            grep -E '^\s*L:\s*[0-9]+' "$LOG" | head -100
+            echo '```'
+            echo "</details>"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$RC" -ne 0 ]; then
+          if [ "${{ inputs.fail-on-error }}" = "true" ]; then
+            echo "::error::sqlfluff encontro $VIOLATIONS violaciones en:$PATHS"
+            exit 1
+          fi
+          echo "::warning::sqlfluff encontro $VIOLATIONS violaciones en:$PATHS (fail-on-error=false, no bloquea)"
+        fi
+        exit 0
