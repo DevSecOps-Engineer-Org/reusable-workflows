@@ -8,53 +8,53 @@ inputs:
   project-key:
     description: Custom Sonar Project Key (optional)
     required: false
-    default: ''
+    default: ""
   organization:
     description: the organization
     required: true
   app-version:
     description: Application version (defaults to build-timestamp)
     required: false
-    default: ''
+    default: ""
   app-code:
     description: Application code (optional)
     required: false
-    default: ''
+    default: ""
   build-timestamp:
     description: The build timestamp
     required: true
   tek:
     description: Technology (java|maven|gradle|kmp|nextjs|nodejs|net-core|mainframe|...)
     required: false
-    default: ''
+    default: ""
   sonar-url:
     description: SonarQube URL
     required: false
-    default: 'https://sonarcloud.io'
+    default: "https://sonarcloud.io"
   sonar-token:
     description: SonarQube token
     required: false
-    default: ''
+    default: ""
   coverage-path:
     description: Coverage report path (lcov.info, jacoco.xml, opencover.xml, kover xml)
     required: false
-    default: ''
+    default: ""
   coverage-tool:
     description: Coverage tool (jacoco|kover|opencover|lcov|auto)
     required: false
-    default: 'auto'
+    default: "auto"
   coverage-exclusions:
     description: Coverage exclusions
     required: false
-    default: ''
+    default: ""
   java-binaries:
     description: Java binaries path
     required: false
-    default: 'target/classes,build/classes'
+    default: "target/classes,build/classes"
   sources:
     description: Source roots to scan
     required: false
-    default: '.'
+    default: "."
 
 runs:
   using: composite
@@ -66,7 +66,7 @@ runs:
         [ -z "$VERSION" ] && VERSION="${{ inputs.build-timestamp }}"
         APP_CODE="${{ inputs.app-code }}"
         [ -z "$APP_CODE" ] && APP_CODE="${{ inputs.app-name }}"
-        
+
         # Lógica para definir el Project Key de forma inteligente
         PROJ_KEY="${{ inputs.project-key }}"
         [ -z "$PROJ_KEY" ] && PROJ_KEY="${{ inputs.organization }}:${{ inputs.app-name }}"
@@ -125,6 +125,38 @@ runs:
             echo "sonar.kotlin.coverage.reportPaths=build/reports/kover/report.xml" >> sonar-project.properties
           fi
           [ -n "${{ inputs.coverage-exclusions }}" ] && echo "sonar.coverage.exclusions=${{ inputs.coverage-exclusions }}" >> sonar-project.properties
+        fi
+
+        # Android (AGP: fuentes, clases compiladas y cobertura JaCoCo de tests unitarios)
+        if [[ "$TEK" == "android" ]]; then
+          echo "sonar.sources=app/src/main/java,app/src/main/kotlin" >> sonar-project.properties
+          echo "sonar.tests=app/src/test/java,app/src/test/kotlin" >> sonar-project.properties
+
+          # Clases compiladas: solo se registran los directorios que existen (las rutas de AGP varian segun version)
+          BINARIES=""
+          for d in app/build/intermediates/javac/debug/classes app/build/tmp/kotlin-classes/debug app/build/intermediates/classes/debug app/build/intermediates/classes; do
+            [ -d "$d" ] && BINARIES="${BINARIES:+$BINARIES,}$d"
+          done
+          [ -n "$BINARIES" ] && echo "sonar.java.binaries=$BINARIES" >> sonar-project.properties
+
+          # Resultados de tests unitarios (variantes debug/release)
+          TEST_REPORTS=""
+          for d in app/build/test-results/testDebugUnitTest app/build/test-results/testReleaseUnitTest; do
+            [ -d "$d" ] && TEST_REPORTS="${TEST_REPORTS:+$TEST_REPORTS,}$d"
+          done
+          [ -n "$TEST_REPORTS" ] && echo "sonar.junit.reportPaths=$TEST_REPORTS" >> sonar-project.properties
+
+          echo "sonar.java.coveragePlugin=jacoco" >> sonar-project.properties
+          if [ -n "${{ inputs.coverage-path }}" ]; then
+            echo "sonar.coverage.jacoco.xmlReportPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
+          else
+            echo "sonar.coverage.jacoco.xmlReportPaths=app/build/reports/coverage/test/debug/report.xml,app/build/reports/jacoco/**/jacocoTestReport.xml" >> sonar-project.properties
+          fi
+          if [ -n "${{ inputs.coverage-exclusions }}" ]; then
+            echo "sonar.coverage.exclusions=${{ inputs.coverage-exclusions }}" >> sonar-project.properties
+          else
+            echo "sonar.coverage.exclusions=**/R.java,**/R.kt,**/BuildConfig.*,**/Manifest*.,**/*_Factory*,**/*_MembersInjector*,**/*_Impl*,**/dagger/**,**/hilt_*,**/*Hilt_*,**/*_HiltModules*,**/*_Provide*,**/*_FactoryProvider*" >> sonar-project.properties
+          fi
         fi
 
         # JS/TS/Next.js/Node
