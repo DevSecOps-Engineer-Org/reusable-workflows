@@ -40,7 +40,7 @@ inputs:
     required: false
     default: ""
   coverage-tool:
-    description: Coverage tool (jacoco|kover|opencover|lcov|auto)
+    description: Coverage tool for Android (jacoco|kover|both|auto; auto/jacoco = JaCoCo, kover = Kover XML, both = JaCoCo + Kover)
     required: false
     default: "auto"
   coverage-exclusions:
@@ -127,7 +127,7 @@ runs:
           [ -n "${{ inputs.coverage-exclusions }}" ] && echo "sonar.coverage.exclusions=${{ inputs.coverage-exclusions }}" >> sonar-project.properties
         fi
 
-        # Android (AGP: fuentes, clases compiladas y cobertura JaCoCo de tests unitarios)
+        # Android (AGP: fuentes, clases compiladas y cobertura configurable via coverage-tool)
         if [[ "$TEK" == "android" ]]; then
           # Solo directorios existentes: el scanner falla si sonar.sources/sonar.tests apuntan a carpetas inexistentes
           SOURCES=""
@@ -156,11 +156,32 @@ runs:
           done
           [ -n "$TEST_REPORTS" ] && echo "sonar.junit.reportPaths=$TEST_REPORTS" >> sonar-project.properties
 
-          echo "sonar.java.coveragePlugin=jacoco" >> sonar-project.properties
-          if [ -n "${{ inputs.coverage-path }}" ]; then
-            echo "sonar.coverage.jacoco.xmlReportPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
-          else
-            echo "sonar.coverage.jacoco.xmlReportPaths=app/build/reports/coverage/test/debug/report.xml,app/build/reports/jacoco/**/jacocoTestReport.xml" >> sonar-project.properties
+          # Modo de cobertura (coverage-tool): jacoco|kover|both|auto
+          # - auto/jacoco: JaCoCo (comportamiento original, retrocompatible)
+          # - kover: XML de Kover via sonar.kotlin.coverage.reportPaths (apps Kotlin puras)
+          # - both: JaCoCo para codigo Java + Kover para codigo Kotlin (apps hibridas)
+          TOOL=$(echo "${{ inputs.coverage-tool }}" | tr '[:upper:]' '[:lower:]')
+          [ -z "$TOOL" ] && TOOL="auto"
+
+          if [[ "$TOOL" == "kover" || "$TOOL" == "both" ]]; then
+            if [ -n "${{ inputs.coverage-path }}" ]; then
+              echo "sonar.kotlin.coverage.reportPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
+            else
+              echo "sonar.kotlin.coverage.reportPaths=app/build/reports/kover/report.xml" >> sonar-project.properties
+            fi
+          fi
+
+          if [[ "$TOOL" != "kover" ]]; then
+            # auto/jacoco/both: cobertura JaCoCo para el codigo Java
+            echo "sonar.java.coveragePlugin=jacoco" >> sonar-project.properties
+            if [[ "$TOOL" == "both" ]]; then
+              # En modo both, coverage-path se reserva para el XML de Kover; JaCoCo usa sus rutas por defecto
+              echo "sonar.coverage.jacoco.xmlReportPaths=app/build/reports/coverage/test/debug/report.xml,app/build/reports/jacoco/**/jacocoTestReport.xml" >> sonar-project.properties
+            elif [ -n "${{ inputs.coverage-path }}" ]; then
+              echo "sonar.coverage.jacoco.xmlReportPaths=${{ inputs.coverage-path }}" >> sonar-project.properties
+            else
+              echo "sonar.coverage.jacoco.xmlReportPaths=app/build/reports/coverage/test/debug/report.xml,app/build/reports/jacoco/**/jacocoTestReport.xml" >> sonar-project.properties
+            fi
           fi
           if [ -n "${{ inputs.coverage-exclusions }}" ]; then
             echo "sonar.coverage.exclusions=${{ inputs.coverage-exclusions }}" >> sonar-project.properties
