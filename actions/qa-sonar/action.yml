@@ -231,7 +231,10 @@ runs:
         cat sonar-project.properties >> "$GITHUB_STEP_SUMMARY"
 
     - name: SonarQube Scan
-      uses: SonarSource/sonarqube-scan-action@13990a695682794b53148ff9f6a8b6e22e43955e
+      # v8.4.1: action composite (sin docker) — el pin anterior (docker-era)
+      # sufria 403 en la provision del JRE contra api.sonarcloud.io y la
+      # imagen docker podia apagarla automaticamente el 9-dic
+      uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
       env:
         SONAR_HOST_URL: ${{ inputs.sonar-url }}
         SONAR_TOKEN: ${{ inputs.sonar-token }}
