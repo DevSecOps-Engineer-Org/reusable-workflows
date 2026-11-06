@@ -1,0 +1,237 @@
+name: Gitleaks Scan
+description: >-
+  Escaneo de secretos con gitleaks (historial git completo o working dir),
+  redactado de secretos en logs, config del repo, baseline y reporte SARIF/JSON
+
+inputs:
+  version:
+    description: Version de gitleaks (pinneada para consistencia entre repos)
+    required: false
+    default: "v8.30.1"
+  config-path:
+    description: >-
+      Archivo .gitleaks.toml propio del repo (vacio = usa .gitleaks.toml /
+      gitleaks.toml del repo si existe, sino la config default de gitleaks)
+    required: false
+    default: ""
+  scan-history:
+    description: >-
+      true: escanea el historial git completo (gitleaks detect) |
+      false: solo el working directory (--no-git), util con checkouts shallow
+    required: false
+    default: "true"
+  fail-on-error:
+    description: "true: falla el paso si encuentra secretos | false: solo advierte"
+    required: false
+    default: "true"
+  redact:
+    description: "true: el valor del secreto NO aparece en logs ni summary (recomendado)"
+    required: false
+    default: "true"
+  baseline-path:
+    description: >-
+      Ruta a un reporte gitleaks previo (json) con hallazgos historicos
+      aceptados; esos hallazgos no bloquean. Ideal para la adopcion en repos
+      con secretos ya conocidos (los secretos igualmente deben rotarse)
+    required: false
+    default: ""
+  report-format:
+    description: >-
+      Formato de reporte opcional para el consumidor (sarif|json). Sarif puede
+      subirse a GitHub code scanning. Vacio = solo conteo interno.
+    required: false
+    default: ""
+  report-path:
+    description: Ruta del reporte cuando se define report-format (default gitleaks-report.<format> en la raiz del workspace)
+    required: false
+    default: ""
+  extra-args:
+    description: Argumentos extra para gitleaks detect
+    required: false
+    default: ""
+
+outputs:
+  leaks:
+    description: Numero de secretos detectados
+    value: ${{ steps.scan.outputs.leaks }}
+  report-path:
+    description: Ruta del reporte (solo si report-format definido)
+    value: ${{ steps.scan.outputs.report }}
+  unblocked:
+    description: '"true" si hubo hallazgos pero fail-on-error=false (no bloqueo el build)'
+    value: ${{ steps.scan.outputs.unblocked }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs and resolve config/baseline
+      id: cfg
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # --- config de gitleaks ---
+        CONFIG_IN="${{ inputs.config-path }}"
+        CONFIG_ARG=""
+        if [ -n "$CONFIG_IN" ]; then
+          [ -f "$CONFIG_IN" ] || { echo "::error::config-path '$CONFIG_IN' no existe"; exit 1; }
+          CONFIG_ARG="--config $CONFIG_IN"
+        elif [ -f .gitleaks.toml ]; then
+          # El repo define su propia config: se respeta explicitamente
+          CONFIG_ARG="--config .gitleaks.toml"
+        elif [ -f gitleaks.toml ]; then
+          CONFIG_ARG="--config gitleaks.toml"
+        fi
+        echo "config=$CONFIG_ARG" >> "$GITHUB_OUTPUT"
+
+        # --- baseline (hallazgos historicos aceptados) ---
+        BASELINE="${{ inputs.baseline-path }}"
+        BASELINE_ARG=""
+        if [ -n "$BASELINE" ]; then
+          [ -f "$BASELINE" ] || { echo "::error::baseline-path '$BASELINE' no existe"; exit 1; }
+          BASELINE_ARG="--baseline-path $BASELINE"
+        fi
+        echo "baseline=$BASELINE_ARG" >> "$GITHUB_OUTPUT"
+
+        # --- reporte ---
+        FORMAT="${{ inputs.report-format }}"
+        case "$FORMAT" in
+          ""|"sarif"|"json") ;;
+          *) echo "::error::report-format '$FORMAT' invalido (sarif|json|vacio)"; exit 1 ;;
+        esac
+
+        if [ -n "$FORMAT" ]; then
+          RP="${{ inputs.report-path }}"
+          [ -z "$RP" ] && RP="${GITHUB_WORKSPACE:-.}/gitleaks-report.$FORMAT"
+          echo "format=$FORMAT" >> "$GITHUB_OUTPUT"
+          echo "report=$RP" >> "$GITHUB_OUTPUT"
+        else
+          echo "format=json" >> "$GITHUB_OUTPUT"
+          echo "report=$(mktemp -d)/gitleaks-count.json" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Install gitleaks
+      id: install
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        VERSION="${{ inputs.version }}"
+        NOV="${VERSION#v}"
+
+        case "$(uname -m)" in
+          x86_64)  ARCH="x64" ;;
+          aarch64) ARCH="arm64" ;;
+          *) echo "::error::Arquitectura no soportada: $(uname -m)"; exit 1 ;;
+        esac
+
+        URL="https://github.com/gitleaks/gitleaks/releases/download/${VERSION}/gitleaks_${NOV}_linux_${ARCH}.tar.gz"
+        TMP="$(mktemp -d)"
+
+        if ! curl -fsSL --retry 3 -o "$TMP/gitleaks.tar.gz" "$URL"; then
+          echo "::error::No se pudo descargar gitleaks $VERSION desde GitHub releases"
+          exit 1
+        fi
+        tar -xzf "$TMP/gitleaks.tar.gz" -C "$TMP" gitleaks
+        chmod +x "$TMP/gitleaks"
+
+        "$TMP/gitleaks" version
+
+        # RUNNER_TEMP persiste entre steps y es limpiado por el runner
+        BIN_DIR="${RUNNER_TEMP:-${GITHUB_WORKSPACE:-.}}"
+        cp "$TMP/gitleaks" "$BIN_DIR/gitleaks"
+        echo "bin=$BIN_DIR/gitleaks" >> "$GITHUB_OUTPUT"
+
+    - name: Run gitleaks detect
+      id: scan
+      shell: bash
+      run: |
+        # sin set -e: el codigo de retorno de gitleaks se maneja manualmente
+        BIN="${{ steps.install.outputs.bin }}"
+        CONFIG="${{ steps.cfg.outputs.config }}"
+        BASELINE="${{ steps.cfg.outputs.baseline }}"
+        FORMAT="${{ steps.cfg.outputs.format }}"
+        REPORT="${{ steps.cfg.outputs.report }}"
+
+        ARGS="--report-format $FORMAT --report-path $REPORT"
+        [ -n "$BASELINE" ] && ARGS="$ARGS $BASELINE"
+        [ -n "$CONFIG" ] && ARGS="$ARGS $CONFIG"
+
+        HIST="${{ inputs.scan-history }}"
+        if [ "$HIST" != "true" ] || [ ! -d .git ]; then
+          [ "$HIST" = "true" ] && echo "::warning::Sin .git en el workspace: fallback a --no-git (usa fetch-depth: 0 para historia completa)"
+          ARGS="$ARGS --no-git"
+        fi
+
+        # redact: el valor del secreto NO se imprime (a menos que redact=false)
+        if [ "${{ inputs.redact }}" = "true" ]; then
+          ARGS="$ARGS --redact"
+        fi
+        ARGS="$ARGS --verbose ${{ inputs.extra-args }}"
+
+        LOG="$(mktemp)"
+        set +e
+        "$BIN" detect $ARGS 2>&1 | tee "$LOG"
+        RC=${PIPESTATUS[0]}
+        set -e
+
+        # --- conteo robusto: preferimos jq; fallback sin jq ---
+        if [ "$FORMAT" = "sarif" ] && command -v jq >/dev/null 2>&1 && [ -s "$REPORT" ]; then
+          LEAKS="$(jq -r '.runs[0].results | length' "$REPORT" 2>/dev/null || echo -1)"
+        elif [ -s "$REPORT" ] && command -v jq >/dev/null 2>&1; then
+          LEAKS="$(jq -r 'length' "$REPORT" 2>/dev/null || echo -1)"
+        elif [ -s "$REPORT" ]; then
+          LEAKS="$(grep -acE '"(Fingerprint|ruleId)"' "$REPORT" || true)"
+        else
+          LEAKS=0
+        fi
+        [ "$LEAKS" -lt 0 ] 2>/dev/null && LEAKS=$(grep -aE 'href=".*redact=|Finding:|Secret:' "$LOG" | wc -l)
+
+        echo "leaks=$LEAKS" >> "$GITHUB_OUTPUT"
+
+        UNBLOCKED="false"
+        if [ "$RC" -ne 0 ] && [ "$LEAKS" -gt 0 ] && [ "${{ inputs.fail-on-error }}" != "true" ]; then
+          UNBLOCKED="true"
+        fi
+        echo "unblocked=$UNBLOCKED" >> "$GITHUB_OUTPUT"
+        [ -n "${{ inputs.report-format }}" ] && echo "report=$REPORT" >> "$GITHUB_OUTPUT"
+
+        # --- summary estilo sql-lint ---
+        {
+          echo "## Gitleaks Scan (${{ inputs.version }})"
+          echo ""
+          echo "| Parametro | Valor |"
+          echo "|---|---|"
+          echo "| Modo | $([ "${{ inputs.scan-history }}" = "true" ] && echo "historial git completo" || echo "solo working dir") |"
+          echo "| Redact | ${{ inputs.redact }} |"
+          echo "| Baseline | ${BASELINE:-ninguno} |"
+          echo "| Secretos detectados | **$LEAKS** |"
+          echo ""
+          if [ "$LEAKS" -gt 0 ]; then
+            echo "<details><summary>Hallazgos (archivo/commit/regla, secretos redactados)</summary>"
+            echo ""
+            echo '```'
+            grep -aE '^(Secret|File|Commit|RuleID|Fingerprint):' "$LOG" | head -100
+            echo '```'
+            echo "</details>"
+          else
+            if [ -s "$REPORT" ] || [ -f "$REPORT" ]; then
+              echo ":white_check_mark: Sin secretos detectados en el $([ "${{ inputs.scan-history }}" = "true" ] && echo "historial completo" || echo "working directory")."
+            fi
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$RC" -ne 0 ]; then
+          if [ "$UNBLOCKED" = "true" ]; then
+            echo "::warning::gitleaks encontro $LEAKS secreto(s) (fail-on-error=false, no bloquea)"
+            exit 0
+          fi
+          if [ "$LEAKS" -gt 0 ]; then
+            echo "::error::gitleaks encontro $LEAKS secreto(s). Rotalos y revoca el acceso: https://gitleaks.io"
+            exit 1
+          fi
+          echo "::error::gitleaks fallo con exit code $RC (revision de config/inputs):"
+          tail -20 "$LOG"
+          exit 1
+        fi
+        exit 0
