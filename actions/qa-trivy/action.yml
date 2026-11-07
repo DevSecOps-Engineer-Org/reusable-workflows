@@ -1,0 +1,403 @@
+name: Trivy Security Scan
+description: >-
+  Escaneo de seguridad polivalente con Trivy: dependencias/SCA (fs), IaC y
+  Dockerfiles (config/misconfig), imagenes de contenedor (image), licencias y
+  secretos, con soporte de .trivyignore, reporte SARIF/JSON/SBOM y Step Summary.
+
+inputs:
+  version:
+    description: Version de Trivy (pinneada para consistencia entre repos)
+    required: false
+    default: "v0.76.2"
+  scan-type:
+    description: >-
+      Modo de escaneo de Trivy: fs (codigo, lockfiles e IaC del repo) |
+      image (imagen Docker/OCI) | config (solo IaC/Dockerfile/K8s/Terraform) |
+      rootfs | repo
+    required: false
+    default: "fs"
+  target:
+    description: >-
+      Ruta del proyecto (para fs/config/rootfs) o nombre:tag de la imagen
+      (obligatorio cuando scan-type=image). Default: "."
+    required: false
+    default: "."
+  scanners:
+    description: >-
+      Escaneadores activos separados por coma (vuln,misconfig,secret,license).
+      En scan-type=config se fuerza misconfig automaticamente.
+    required: false
+    default: "vuln,misconfig"
+  severity:
+    description: Severidades a reportar y evaluar separadas por coma (CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN)
+    required: false
+    default: "CRITICAL,HIGH"
+  ignore-unfixed:
+    description: "true: ignora CVEs que aun no tienen parche publicado | false: reporta todos"
+    required: false
+    default: "false"
+  vuln-type:
+    description: Tipos de vulnerabilidad a escanear (os,library)
+    required: false
+    default: "os,library"
+  ignorefile:
+    description: >-
+      Ruta a archivo de exclusiones (.trivyignore o .trivyignore.yaml).
+      Vacio = autodeteccion en la raiz del repo si existe.
+    required: false
+    default: ""
+  config-path:
+    description: >-
+      Archivo trivy.yaml propio del repo (vacio = autodeteccion de trivy.yaml /
+      .trivy.yaml si existe)
+    required: false
+    default: ""
+  skip-dirs:
+    description: Directorios a omitir separados por coma (util en fs/config)
+    required: false
+    default: "node_modules,.next,dist,build,.git,coverage,vendor"
+  skip-files:
+    description: Archivos a omitir separados por coma
+    required: false
+    default: ""
+  fail-on-error:
+    description: "true: falla el paso si hay hallazgos de la severidad indicada | false: solo advierte"
+    required: false
+    default: "true"
+  report-format:
+    description: >-
+      Formato de reporte opcional para el consumidor (sarif|json|cyclonedx|spdx-json).
+      sarif puede subirse a GitHub Code Scanning; cyclonedx/spdx-json generan SBOM.
+    required: false
+    default: ""
+  report-path:
+    description: >-
+      Ruta del reporte cuando se define report-format
+      (default: trivy-report.<format> en la raiz del workspace)
+    required: false
+    default: ""
+  extra-args:
+    description: Argumentos adicionales para el comando trivy
+    required: false
+    default: ""
+
+outputs:
+  vulnerabilities:
+    description: Numero de vulnerabilidades (CVEs) detectadas
+    value: ${{ steps.scan.outputs.vulnerabilities }}
+  misconfigurations:
+    description: Numero de misconfigurations (IaC/Dockerfile) detectadas
+    value: ${{ steps.scan.outputs.misconfigurations }}
+  secrets:
+    description: Numero de secretos detectados (si secret esta en scanners)
+    value: ${{ steps.scan.outputs.secrets }}
+  licenses:
+    description: Numero de problemas de licencias detectados (si license esta en scanners)
+    value: ${{ steps.scan.outputs.licenses }}
+  total:
+    description: Total de hallazgos sumados
+    value: ${{ steps.scan.outputs.total }}
+  report-path:
+    description: Ruta del reporte generado (solo si report-format fue especificado)
+    value: ${{ steps.scan.outputs.report }}
+  unblocked:
+    description: '"true" si hubo hallazgos pero fail-on-error=false (no bloqueo el build)'
+    value: ${{ steps.scan.outputs.unblocked }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs and resolve config/ignorefile
+      id: cfg
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        SCAN_TYPE="${{ inputs.scan-type }}"
+        case "$SCAN_TYPE" in
+          fs|image|config|rootfs|repo) ;;
+          *)
+            echo "::error::scan-type '$SCAN_TYPE' invalido. Valores permitidos: fs|image|config|rootfs|repo"
+            exit 1
+            ;;
+        esac
+
+        TARGET="${{ inputs.target }}"
+        if [ "$SCAN_TYPE" = "image" ] && { [ -z "$TARGET" ] || [ "$TARGET" = "." ]; }; then
+          echo "::error::Para scan-type=image debes indicar el nombre de la imagen en 'target' (ej: mi-app:latest)"
+          exit 1
+        fi
+        if [[ "$SCAN_TYPE" == "fs" || "$SCAN_TYPE" == "config" || "$SCAN_TYPE" == "rootfs" ]]; then
+          [ -e "$TARGET" ] || { echo "::error::El target '$TARGET' no existe en el workspace"; exit 1; }
+        fi
+
+        # --- config de trivy ---
+        CONFIG_IN="${{ inputs.config-path }}"
+        CONFIG_ARG=""
+        if [ -n "$CONFIG_IN" ]; then
+          [ -f "$CONFIG_IN" ] || { echo "::error::config-path '$CONFIG_IN' no existe"; exit 1; }
+          CONFIG_ARG="--config $CONFIG_IN"
+        elif [ -f trivy.yaml ]; then
+          CONFIG_ARG="--config trivy.yaml"
+        elif [ -f .trivy.yaml ]; then
+          CONFIG_ARG="--config .trivy.yaml"
+        fi
+        echo "config=$CONFIG_ARG" >> "$GITHUB_OUTPUT"
+
+        # --- ignorefile (.trivyignore) ---
+        IGNORE_IN="${{ inputs.ignorefile }}"
+        IGNORE_ARG=""
+        if [ -n "$IGNORE_IN" ]; then
+          [ -f "$IGNORE_IN" ] || { echo "::error::ignorefile '$IGNORE_IN' no existe"; exit 1; }
+          IGNORE_ARG="--ignorefile $IGNORE_IN"
+        elif [ -f .trivyignore ]; then
+          IGNORE_ARG="--ignorefile .trivyignore"
+        elif [ -f .trivyignore.yaml ]; then
+          IGNORE_ARG="--ignorefile .trivyignore.yaml"
+        elif [ -f .trivyignore.yml ]; then
+          IGNORE_ARG="--ignorefile .trivyignore.yml"
+        fi
+        echo "ignore=$IGNORE_ARG" >> "$GITHUB_OUTPUT"
+
+        # --- formato de reporte opcional ---
+        FORMAT="${{ inputs.report-format }}"
+        case "$FORMAT" in
+          ""|sarif|json|cyclonedx|spdx-json) ;;
+          *)
+            echo "::error::report-format '$FORMAT' invalido (sarif|json|cyclonedx|spdx-json|vacio)"
+            exit 1
+            ;;
+        esac
+
+        RP="${{ inputs.report-path }}"
+        if [ -n "$FORMAT" ] && [ -z "$RP" ]; then
+          EXT="$FORMAT"
+          [ "$FORMAT" = "cyclonedx" ] && EXT="cdx.json"
+          [ "$FORMAT" = "spdx-json" ] && EXT="spdx.json"
+          RP="${GITHUB_WORKSPACE:-.}/trivy-report.$EXT"
+        fi
+        echo "format=$FORMAT" >> "$GITHUB_OUTPUT"
+        echo "report=$RP" >> "$GITHUB_OUTPUT"
+
+    - name: Install Trivy
+      id: install
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        VERSION="${{ inputs.version }}"
+        NOV="${VERSION#v}"
+
+        case "$(uname -m)" in
+          x86_64)  ARCH="64bit" ;;
+          aarch64) ARCH="ARM64" ;;
+          *) echo "::error::Arquitectura no soportada: $(uname -m)"; exit 1 ;;
+        esac
+
+        URL="https://github.com/aquasecurity/trivy/releases/download/${VERSION}/trivy_${NOV}_Linux-${ARCH}.tar.gz"
+        TMP="$(mktemp -d)"
+
+        if ! curl -fsSL --retry 3 -o "$TMP/trivy.tar.gz" "$URL"; then
+          echo "::error::No se pudo descargar Trivy $VERSION desde GitHub releases ($URL)"
+          exit 1
+        fi
+        tar -xzf "$TMP/trivy.tar.gz" -C "$TMP" trivy
+        chmod +x "$TMP/trivy"
+
+        "$TMP/trivy" --version
+
+        BIN_DIR="${RUNNER_TEMP:-${GITHUB_WORKSPACE:-.}}"
+        cp "$TMP/trivy" "$BIN_DIR/trivy"
+        echo "bin=$BIN_DIR/trivy" >> "$GITHUB_OUTPUT"
+
+    - name: Run Trivy scan
+      id: scan
+      shell: bash
+      run: |
+        set -uo pipefail
+
+        BIN="${{ steps.install.outputs.bin }}"
+        CONFIG="${{ steps.cfg.outputs.config }}"
+        IGNORE="${{ steps.cfg.outputs.ignore }}"
+        FORMAT="${{ steps.cfg.outputs.format }}"
+        REPORT="${{ steps.cfg.outputs.report }}"
+
+        SCAN_TYPE="${{ inputs.scan-type }}"
+        TARGET="${{ inputs.target }}"
+        SCANNERS="${{ inputs.scanners }}"
+        SEVERITY="${{ inputs.severity }}"
+
+        # En modo config el scanner valido es misconfig
+        if [ "$SCAN_TYPE" = "config" ]; then
+          SCANNERS="misconfig"
+        fi
+
+        COMMON_ARGS="--severity $SEVERITY --no-progress"
+        [ -n "$SCANNERS" ] && COMMON_ARGS="$COMMON_ARGS --scanners $SCANNERS"
+        [ -n "$CONFIG" ] && COMMON_ARGS="$COMMON_ARGS $CONFIG"
+        [ -n "$IGNORE" ] && COMMON_ARGS="$COMMON_ARGS $IGNORE"
+
+        if [ "${{ inputs.ignore-unfixed }}" = "true" ]; then
+          COMMON_ARGS="$COMMON_ARGS --ignore-unfixed"
+        fi
+
+        # vuln-type aplica cuando vuln esta habilitado y el modo lo soporta
+        if [[ "$SCAN_TYPE" == "image" || "$SCAN_TYPE" == "rootfs" ]] && [[ "$SCANNERS" == *"vuln"* ]] && [ -n "${{ inputs.vuln-type }}" ]; then
+          COMMON_ARGS="$COMMON_ARGS --pkg-types ${{ inputs.vuln-type }}"
+        fi
+
+        if [ -n "${{ inputs.skip-dirs }}" ] && [ "$SCAN_TYPE" != "image" ]; then
+          COMMON_ARGS="$COMMON_ARGS --skip-dirs ${{ inputs.skip-dirs }}"
+        fi
+        if [ -n "${{ inputs.skip-files }}" ] && [ "$SCAN_TYPE" != "image" ]; then
+          COMMON_ARGS="$COMMON_ARGS --skip-files ${{ inputs.skip-files }}"
+        fi
+
+        JSON_TMP="$(mktemp -d)/trivy-results.json"
+        LOG="$(mktemp)"
+
+        echo "Ejecutando: trivy $SCAN_TYPE $COMMON_ARGS ${{ inputs.extra-args }} $TARGET"
+        set +e
+        "$BIN" "$SCAN_TYPE" $COMMON_ARGS \
+          --format json --output "$JSON_TMP" \
+          ${{ inputs.extra-args }} "$TARGET" 2>&1 | tee "$LOG"
+        RC=${PIPESTATUS[0]}
+        set -e
+
+        if [ "$RC" -ne 0 ] || [ ! -s "$JSON_TMP" ]; then
+          echo "::error::Trivy fallo durante la ejecucion (exit code $RC):"
+          tail -30 "$LOG"
+          exit 1
+        fi
+
+        # --- Conteo estructurado desde el JSON ---
+        VULNS="$(jq '[.Results[]?.Vulnerabilities[]?] | length' "$JSON_TMP" 2>/dev/null || echo 0)"
+        MISCONFIGS="$(jq '[.Results[]?.Misconfigurations[]?] | length' "$JSON_TMP" 2>/dev/null || echo 0)"
+        SECRETS="$(jq '[.Results[]?.Secrets[]?] | length' "$JSON_TMP" 2>/dev/null || echo 0)"
+        LICENSES="$(jq '[.Results[]?.Licenses[]?] | length' "$JSON_TMP" 2>/dev/null || echo 0)"
+        TOTAL=$((VULNS + MISCONFIGS + SECRETS + LICENSES))
+
+        echo "vulnerabilities=$VULNS" >> "$GITHUB_OUTPUT"
+        echo "misconfigurations=$MISCONFIGS" >> "$GITHUB_OUTPUT"
+        echo "secrets=$SECRETS" >> "$GITHUB_OUTPUT"
+        echo "licenses=$LICENSES" >> "$GITHUB_OUTPUT"
+        echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+
+        # --- Impresion legible en consola ---
+        echo ""
+        echo "=== Resumen Trivy ($SCAN_TYPE -> $TARGET) ==="
+        echo "  Vulnerabilidades (CVE): $VULNS"
+        echo "  Misconfigurations     : $MISCONFIGS"
+        echo "  Secretos              : $SECRETS"
+        echo "  Licencias             : $LICENSES"
+        echo "  Total hallazgos       : $TOTAL"
+        echo ""
+
+        if [ "$VULNS" -gt 0 ]; then
+          echo "--- Vulnerabilidades detectadas ---"
+          jq -r '
+            .Results[]? | select(.Vulnerabilities != null) | .Target as $t |
+            .Vulnerabilities[] |
+            "  [\(.Severity)] \($t) | \(.PkgName)@\(.InstalledVersion) -> \(.VulnerabilityID) (fix: \(.FixedVersion // "sin fix")) — \(.Title // .Description // "" | split("\n")[0] | .[0:90])"
+          ' "$JSON_TMP"
+          echo ""
+        fi
+
+        if [ "$MISCONFIGS" -gt 0 ]; then
+          echo "--- Misconfigurations detectadas ---"
+          jq -r '
+            .Results[]? | select(.Misconfigurations != null) | .Target as $t |
+            .Misconfigurations[] |
+            "  [\(.Severity)] \($t) | \(.ID): \(.Title // .Message // "")"
+          ' "$JSON_TMP"
+          echo ""
+        fi
+
+        if [ "$SECRETS" -gt 0 ]; then
+          echo "--- Secretos detectados ---"
+          jq -r '
+            .Results[]? | select(.Secrets != null) | .Target as $t |
+            .Secrets[] |
+            "  [\(.Severity)] \($t):\(.StartLine) | \(.RuleID): \(.Title)"
+          ' "$JSON_TMP"
+          echo ""
+        fi
+
+        # --- Generacion de reporte adicional si se pidio report-format ---
+        if [ -n "$FORMAT" ]; then
+          if [ "$FORMAT" = "json" ]; then
+            cp "$JSON_TMP" "$REPORT"
+          else
+            "$BIN" convert --format "$FORMAT" --output "$REPORT" "$JSON_TMP"
+          fi
+          echo "Reporte ($FORMAT) generado en: $REPORT"
+          echo "report=$REPORT" >> "$GITHUB_OUTPUT"
+        fi
+
+        UNBLOCKED="false"
+        if [ "$TOTAL" -gt 0 ] && [ "${{ inputs.fail-on-error }}" != "true" ]; then
+          UNBLOCKED="true"
+        fi
+        echo "unblocked=$UNBLOCKED" >> "$GITHUB_OUTPUT"
+
+        # --- GitHub Step Summary ---
+        {
+          echo "## Trivy Security Scan (${{ inputs.version }})"
+          echo ""
+          echo "| Parametro | Valor |"
+          echo "|---|---|"
+          echo "| Modo (\`scan-type\`) | \`$SCAN_TYPE\` |"
+          echo "| Target | \`$TARGET\` |"
+          echo "| Scanners | \`$SCANNERS\` |"
+          echo "| Severidad | \`$SEVERITY\` |"
+          echo "| Ignore unfixed | \`${{ inputs.ignore-unfixed }}\` |"
+          echo "| Ignorefile | \`${IGNORE:-ninguno}\` |"
+          echo "| Vulnerabilidades (CVE) | **$VULNS** |"
+          echo "| Misconfigurations (IaC) | **$MISCONFIGS** |"
+          echo "| Secretos | **$SECRETS** |"
+          echo "| Licencias | **$LICENSES** |"
+          echo "| **Total hallazgos** | **$TOTAL** |"
+          echo ""
+
+          if [ "$VULNS" -gt 0 ]; then
+            echo "<details><summary>Vulnerabilidades detectadas ($VULNS)</summary>"
+            echo ""
+            echo "| Severidad | Target | Paquete | Instalado | Fix | CVE | Titulo |"
+            echo "|---|---|---|---|---|---|---|"
+            jq -r '
+              .Results[]? | select(.Vulnerabilities != null) | .Target as $t |
+              .Vulnerabilities[] |
+              "| `\(.Severity)` | `\($t)` | `\(.PkgName)` | `\(.InstalledVersion)` | `\(.FixedVersion // "sin fix")` | `\(.VulnerabilityID)` | \((.Title // .Description // "-") | split("\n")[0] | gsub("\\|"; "/") | .[0:80]) |"
+            ' "$JSON_TMP" | head -100
+            echo ""
+            echo "</details>"
+          fi
+
+          if [ "$MISCONFIGS" -gt 0 ]; then
+            echo "<details><summary>Misconfigurations detectadas ($MISCONFIGS)</summary>"
+            echo ""
+            echo "| Severidad | Archivo | ID | Descripcion |"
+            echo "|---|---|---|---|"
+            jq -r '
+              .Results[]? | select(.Misconfigurations != null) | .Target as $t |
+              .Misconfigurations[] |
+              "| `\(.Severity)` | `\($t)` | `\(.ID)` | \((.Title // .Message // "-") | split("\n")[0] | gsub("\\|"; "/") | .[0:90]) |"
+            ' "$JSON_TMP" | head -100
+            echo ""
+            echo "</details>"
+          fi
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo ":white_check_mark: Sin hallazgos para severidad \`$SEVERITY\`."
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$TOTAL" -gt 0 ]; then
+          if [ "$UNBLOCKED" = "true" ]; then
+            echo "::warning::Trivy encontro $TOTAL hallazgo(s) ($VULNS vulns, $MISCONFIGS misconfigs, $SECRETS secrets, $LICENSES licenses) con fail-on-error=false (no bloquea)"
+            exit 0
+          fi
+          echo "::error::Trivy encontro $TOTAL hallazgo(s) ($VULNS vulns, $MISCONFIGS misconfigs, $SECRETS secrets, $LICENSES licenses) con severidad $SEVERITY"
+          exit 1
+        fi
+        exit 0
