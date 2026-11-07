@@ -246,15 +246,112 @@ runs:
         cat .scannerwork/report-task.txt
         cat .scannerwork/report-task.txt >> "$GITHUB_STEP_SUMMARY"
 
-    - name: SonarQube Quality Gate check
+    - name: SonarQube Quality Gate check (poll con reintentos)
+      # Reemplaza a SonarSource/sonarqube-quality-gate-action: ese action usa
+      # curl --fail y muere con HTTP 403 TRANSITORIO en los primeros ~2-4s
+      # despues de subir el reporte (observado en SonarCloud con repos
+      # privados, public o privado da igual: mientras el backend procesa el
+      # reporte, ce/task puede responder 403/401 y luego 200 con el mismo
+      # token). Este poll reintenta y solo falla si el proceso real falla.
+      # NO utiliza curl --fail: los codigos HTTP transitorios se toleran.
       id: sonarqube-quality-gate-check
-      uses: SonarSource/sonarqube-quality-gate-action@7a5fffe8e523c40e0c740b6bc2712ab503e52efa
+      shell: bash
       env:
         SONAR_HOST_URL: ${{ inputs.sonar-url }}
         SONAR_TOKEN: ${{ inputs.sonar-token }}
+      run: |
+        set -uo pipefail
+        report=".scannerwork/report-task.txt"
+        [ -f "$report" ] || { echo "ERROR: no existe $report (el scan no corrió)"; exit 1; }
+
+        ce_task_url="$(sed -n 's/^ceTaskUrl=//p' "$report" | tr -d '\r')"
+        [ -n "$ce_task_url" ] || { echo "ERROR: ceTaskUrl no encontrado en $report"; exit 1; }
+        server="$(sed -n 's/^serverUrl=//p' "$report" | tr -d '\r')"
+        server="${server:-${SONAR_HOST_URL%/}}"
+
+        # --- Fase 1: esperar el resultado del procesamiento del reporte ---
+        echo "Esperando procesamiento del reporte en SonarCloud..."
+        deadline=$((SECONDS + 300))
+        task='{}'
+        while :; do
+          code="$(curl -s -o /tmp/qg_task.json -w '%{http_code}' \
+            -u "${SONAR_TOKEN}:" "$ce_task_url" 2>/dev/null)"
+          if [ "$code" = "200" ] && jq -e '.task.status' /tmp/qg_task.json >/dev/null 2>&1; then
+            task="$(cat /tmp/qg_task.json)"
+            break
+          fi
+          if [ $SECONDS -ge $deadline ]; then
+            echo "ERROR: timeout esperando el task (HTTP $code) en $ce_task_url"; exit 1
+          fi
+          echo "  HTTP $code transitorio (el backend aún procesa el reporte), reintento en 5s..."
+          sleep 5
+        done
+
+        task_status="$(jq -r '.task.status' <<<"$task")"
+        echo "CE task status: $task_status"
+        if [ "$task_status" != "SUCCESS" ]; then
+          jq -r '.task.errorMessage // "task '$task_status' sin mensaje de error"' <<<"$task"
+          exit 1
+        fi
+
+        # --- Fase 2: consultar el Quality Gate del analisis ---
+        analysis="$(jq -r '.task.analysisId' <<<"$task")"
+        deadline=$((SECONDS + 120))
+        gate=""
+        while :; do
+          code="$(curl -s -o /tmp/qg_status.json -w '%{http_code}' \
+            -u "${SONAR_TOKEN}:" "$server/api/qualitygates/project_status?analysisId=$analysis" 2>/dev/null)"
+          if [ "$code" = "200" ]; then
+            gate="$(jq -r '.projectStatus.status // empty' /tmp/qg_status.json 2>/dev/null || true)"
+          fi
+          if [ -n "$gate" ] && [ "$gate" != "NONE" ]; then
+            break
+          fi
+          if [ $SECONDS -ge $deadline ]; then
+            [ -z "$gate" ] && gate="NONE"
+            echo "  WARN: timeout esperando computo del gate (status: $gate)"
+            break
+          fi
+          echo "  gate aun no computado (HTTP $code, status ${gate:-vacio}), reintento en 5s..."
+          sleep 5
+        done
+
+        echo "Quality Gate status: $gate"
+        jq -r '
+          if .projectStatus then
+            .projectStatus
+            | "Condiciones del quality gate:",
+              (.conditions[]? | "  - " + .metricKey + ": " + (.actualValue|tostring) + " (umbral " + (.errorThreshold|tostring) + ") -> " + .status)
+          else . end' /tmp/qg_status.json 2>/dev/null || true
+
+        set_output() {
+          if [[ -n "${GITHUB_OUTPUT}" ]]; then
+            echo "$1=$2" >> "$GITHUB_OUTPUT"
+          else
+            echo "::set-output name=$1::$2"
+          fi
+        }
+        set_output quality-gate-status "$gate"
+
+        # OK/WARN -> exit 0 (verde); cualquier otro estado -> exit 1 (rojo)
+        case "$gate" in
+          OK)
+            echo "Quality Gate PASSED"
+            exit 0
+            ;;
+          WARN)
+            echo "Quality Gate WARN (revisar dashboard); el paso no falla"
+            exit 0
+            ;;
+          *)
+            echo "Quality Gate FAILED/estatus: $gate"
+            exit 1
+            ;;
+        esac
 
     - name: Show SonarQube Quality Gate Status value
       shell: bash
+      if: always()
       run: |
         echo "## SonarQube Quality Gate Status" >> "$GITHUB_STEP_SUMMARY"
         echo "The Quality Gate status is ${{ steps.sonarqube-quality-gate-check.outputs.quality-gate-status }}" >> "$GITHUB_STEP_SUMMARY"
