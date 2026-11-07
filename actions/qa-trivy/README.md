@@ -18,6 +18,7 @@ Escaneo de seguridad polivalente usando [Trivy](https://github.com/aquasecurity/
 | `scanners` | `vuln,misconfig` | Escaneadores separados por coma (`vuln,misconfig,secret,license`) |
 | `severity` | `CRITICAL,HIGH` | Severidades evaluadas (`CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN`) |
 | `ignore-unfixed` | `false` | `true` ignora vulnerabilidades que aun no tienen version corregida |
+| `include-dev-deps` | `true` | `true` incluye dependencias de desarrollo/test (`devDependencies`, scope `test`) en el escaneo SCA |
 | `vuln-type` | `os,library` | Tipos de paquetes en modo `image`/`rootfs` (`os,library`) |
 | `ignorefile` | `""` | Ruta a archivo `.trivyignore`; vacio autodectecta `.trivyignore` / `.trivyignore.yaml` en la raiz |
 | `config-path` | `""` | Ruta a `trivy.yaml` propio; vacio autodetecta `trivy.yaml` / `.trivy.yaml` en la raiz |

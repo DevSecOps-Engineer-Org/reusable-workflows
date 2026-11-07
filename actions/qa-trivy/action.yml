@@ -36,6 +36,10 @@ inputs:
     description: "true: ignora CVEs que aun no tienen parche publicado | false: reporta todos"
     required: false
     default: "false"
+  include-dev-deps:
+    description: "true: incluye dependencias de desarrollo/test (devDependencies, test scope) en el escaneo SCA | false: solo produccion"
+    required: false
+    default: "true"
   vuln-type:
     description: Tipos de vulnerabilidad a escanear (os,library)
     required: false
@@ -241,6 +245,10 @@ runs:
           COMMON_ARGS="$COMMON_ARGS --ignore-unfixed"
         fi
 
+        if [ "${{ inputs.include-dev-deps }}" = "true" ] && [[ "$SCAN_TYPE" == "fs" || "$SCAN_TYPE" == "repo" || "$SCAN_TYPE" == "rootfs" ]] && [[ "$SCANNERS" == *"vuln"* ]]; then
+          COMMON_ARGS="$COMMON_ARGS --include-dev-deps"
+        fi
+
         # vuln-type aplica cuando vuln esta habilitado y el modo lo soporta
         if [[ "$SCAN_TYPE" == "image" || "$SCAN_TYPE" == "rootfs" ]] && [[ "$SCANNERS" == *"vuln"* ]] && [ -n "${{ inputs.vuln-type }}" ]; then
           COMMON_ARGS="$COMMON_ARGS --pkg-types ${{ inputs.vuln-type }}"
@@ -276,6 +284,8 @@ runs:
         SECRETS="$(jq '[.Results[]?.Secrets[]?] | length' "$JSON_TMP" 2>/dev/null || echo 0)"
         LICENSES="$(jq '[.Results[]?.Licenses[]?] | length' "$JSON_TMP" 2>/dev/null || echo 0)"
         TOTAL=$((VULNS + MISCONFIGS + SECRETS + LICENSES))
+        TARGETS_SUMMARY="$(jq -r '[.Results[]? | "\(.Target) (\(.Type // .Class // "scan"))"] | unique | join(", ")' "$JSON_TMP" 2>/dev/null || true)"
+        [ -z "$TARGETS_SUMMARY" ] && TARGETS_SUMMARY="ninguno detectado"
 
         echo "vulnerabilities=$VULNS" >> "$GITHUB_OUTPUT"
         echo "misconfigurations=$MISCONFIGS" >> "$GITHUB_OUTPUT"
@@ -286,6 +296,8 @@ runs:
         # --- Impresion legible en consola ---
         echo ""
         echo "=== Resumen Trivy ($SCAN_TYPE -> $TARGET) ==="
+        echo "  Archivos/Targets SCA  : $TARGETS_SUMMARY"
+        echo "  Incluye devDeps       : ${{ inputs.include-dev-deps }}"
         echo "  Vulnerabilidades (CVE): $VULNS"
         echo "  Misconfigurations     : $MISCONFIGS"
         echo "  Secretos              : $SECRETS"
@@ -348,8 +360,10 @@ runs:
           echo "|---|---|"
           echo "| Modo (\`scan-type\`) | \`$SCAN_TYPE\` |"
           echo "| Target | \`$TARGET\` |"
+          echo "| Archivos / Ecosistemas auditados | \`$TARGETS_SUMMARY\` |"
           echo "| Scanners | \`$SCANNERS\` |"
           echo "| Severidad | \`$SEVERITY\` |"
+          echo "| Incluye devDependencies | \`${{ inputs.include-dev-deps }}\` |"
           echo "| Ignore unfixed | \`${{ inputs.ignore-unfixed }}\` |"
           echo "| Ignorefile | \`${IGNORE:-ninguno}\` |"
           echo "| Vulnerabilidades (CVE) | **$VULNS** |"
