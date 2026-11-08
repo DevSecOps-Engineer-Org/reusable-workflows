@@ -273,12 +273,22 @@ runs:
         echo "Esperando procesamiento del reporte en SonarCloud..."
         deadline=$((SECONDS + 300))
         task='{}'
+        task_status=""
         while :; do
           code="$(curl -s -o /tmp/qg_task.json -w '%{http_code}' \
             -u "${SONAR_TOKEN}:" "$ce_task_url" 2>/dev/null)"
           if [ "$code" = "200" ] && jq -e '.task.status' /tmp/qg_task.json >/dev/null 2>&1; then
             task="$(cat /tmp/qg_task.json)"
-            break
+            task_status="$(jq -r '.task.status' <<<"$task")"
+            if [ "$task_status" != "PENDING" ] && [ "$task_status" != "IN_PROGRESS" ]; then
+              break
+            fi
+            if [ $SECONDS -ge $deadline ]; then
+              echo "ERROR: timeout esperando fin del task (estado actual: $task_status) en $ce_task_url"; exit 1
+            fi
+            echo "  Task en estado $task_status, esperando 5s..."
+            sleep 5
+            continue
           fi
           if [ $SECONDS -ge $deadline ]; then
             echo "ERROR: timeout esperando el task (HTTP $code) en $ce_task_url"; exit 1
@@ -287,7 +297,6 @@ runs:
           sleep 5
         done
 
-        task_status="$(jq -r '.task.status' <<<"$task")"
         echo "CE task status: $task_status"
         if [ "$task_status" != "SUCCESS" ]; then
           jq -r '.task.errorMessage // "task '$task_status' sin mensaje de error"' <<<"$task"
