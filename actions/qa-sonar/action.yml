@@ -333,6 +333,26 @@ runs:
               (.conditions[]? | "  - " + .metricKey + ": " + (.actualValue|tostring) + " (umbral " + (.errorThreshold|tostring) + ") -> " + .status)
           else . end' /tmp/qg_status.json 2>/dev/null || true
 
+        {
+          echo "## SonarQube Quality Gate Status"
+          echo ""
+          case "$gate" in
+            OK)   echo ":white_check_mark: **Quality Gate: PASSED (\`$gate\`)**" ;;
+            WARN) echo ":warning: **Quality Gate: WARN (\`$gate\`)**" ;;
+            *)    echo ":x: **Quality Gate: FAILED (\`$gate\`)**" ;;
+          esac
+          echo ""
+          if jq -e '.projectStatus.conditions | length > 0' /tmp/qg_status.json >/dev/null 2>&1; then
+            echo "| Metrica | Valor actual | Umbral | Estado |"
+            echo "|---|---|---|---|"
+            jq -r '
+              .projectStatus.conditions[]
+              | "| `\(.metricKey)` | `\(.actualValue // "-")` | `\(.comparator // "") \(.errorThreshold // "-")` | **\(.status)** |"
+            ' /tmp/qg_status.json
+            echo ""
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
         set_output() {
           if [[ -n "${GITHUB_OUTPUT}" ]]; then
             echo "$1=$2" >> "$GITHUB_OUTPUT"
@@ -362,6 +382,14 @@ runs:
       shell: bash
       if: always()
       run: |
-        echo "## SonarQube Quality Gate Status" >> "$GITHUB_STEP_SUMMARY"
-        echo "The Quality Gate status is ${{ steps.sonarqube-quality-gate-check.outputs.quality-gate-status }}" >> "$GITHUB_STEP_SUMMARY"
-        echo "The Quality Gate status is ${{ steps.sonarqube-quality-gate-check.outputs.quality-gate-status }}"
+        GATE_VAL="${{ steps.sonarqube-quality-gate-check.outputs.quality-gate-status }}"
+        if [ -z "$GATE_VAL" ]; then
+          {
+            echo "## SonarQube Quality Gate Status"
+            echo ""
+            echo ":x: **El paso \`SonarQube Scan\` fallo antes de poder evaluar el Quality Gate.** Revisa el log del step \`SonarQube Scan\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "SonarQube Scan fallo antes de evaluar el Quality Gate."
+        else
+          echo "The Quality Gate status is $GATE_VAL"
+        fi
